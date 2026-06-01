@@ -1,0 +1,6 @@
+{
+  "name": "flownote",
+  "version": "2.5.0",
+  "description": "Minimalist notes, todos & Google Calendar. Build daily streaks.",
+  "scripts": { "build": "echo 'static'" }
+}
