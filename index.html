@@ -2243,5 +2243,127 @@ applyTheme();
   </div>
 </div>
 
+<script type="module">
+import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
+
+const SUPABASE_URL = "https://twwlwvlsrheyfiexmfvo.supabase.co";
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR3d2x3dmxzcmhleWZpZXhtZnZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAzMzc0ODQsImV4cCI6MjA5NTkxMzQ4NH0.YndWwVZaijZOtpYK8qh3keCWU0I75TH3qaK7yrAQ0IQ";
+const db = createClient(SUPABASE_URL, SUPABASE_KEY);
+window._db = db;
+
+async function getUser() {
+  const { data: { user } } = await db.auth.getUser();
+  return user;
+}
+
+let _syncTimer = null;
+const _origSave = window.save;
+window.save = function() {
+  if (_origSave) _origSave();
+  clearTimeout(_syncTimer);
+  _syncTimer = setTimeout(async () => {
+    const user = await getUser();
+    if (!user) return;
+    const cutoff = Date.now() - 90000;
+    try {
+      const recentNotes = (state.notes||[]).filter(n => (n.modified||0) > cutoff);
+      for (const n of recentNotes) {
+        await db.from("notes").upsert({ user_id: user.id, title: n.title||"", content: n.content||"", tag: n.tag||null, modified_at: new Date().toISOString() });
+      }
+      const recentTodos = (state.todos||[]).filter(t => (t.created||0) > cutoff || t.done);
+      for (const t of recentTodos) {
+        await db.from("todos").upsert({ user_id: user.id, text: t.text, priority: String(t.priority||"2"), done: t.done||false, due_label: t.due||"Today", cal_linked: t.cal||false, done_at: t.done ? new Date().toISOString() : null });
+      }
+      await db.from("profiles").update({ streak_count: (state.streak||{}).count||0, streak_last_active: new Date().toISOString().split("T")[0], settings: state.settings||{} }).eq("id", user.id);
+    } catch(e) { console.warn("[sync]", e.message); }
+  }, 2000);
+};
+
+async function pullFromCloud(user) {
+  try {
+    const [{ data: notes }, { data: todos }, { data: profile }] = await Promise.all([
+      db.from("notes").select("*").eq("user_id", user.id).order("modified_at", { ascending: false }),
+      db.from("todos").select("*").eq("user_id", user.id).order("created_at", { ascending: false }),
+      db.from("profiles").select("*").eq("id", user.id).single()
+    ]);
+    if (notes && notes.length) {
+      state.notes = notes.map(n => ({ id: n.id, title: n.title||"", content: n.content||"", tag: n.tag, modified: new Date(n.modified_at).getTime() }));
+      if (window.renderNotesList) renderNotesList();
+      if (state.notes[0] && window.openNote) openNote(state.notes[0].id);
+    }
+    if (todos && todos.length) {
+      state.todos = todos.map(t => ({ id: t.id, text: t.text, priority: t.priority, done: t.done, due: t.due_label||"Today", cal: t.cal_linked, created: new Date(t.created_at).getTime() }));
+      if (window.renderTodos) renderTodos();
+    }
+    if (profile) {
+      state.streak = state.streak||{};
+      state.streak.count = profile.streak_count||0;
+      if (profile.settings) state.settings = { ...state.settings, ...profile.settings };
+      if (window.renderStreakUI) renderStreakUI();
+    }
+    if (window.save) save();
+    showToast("☁️ Synced from cloud", "success");
+  } catch(e) { console.warn("[pull]", e.message); }
+}
+
+window.authLogin = async function() {
+  const email = document.getElementById("login-email").value.trim();
+  const pwd   = document.getElementById("login-password").value;
+  if (!email || !pwd) { showAuthError("Please fill in all fields."); return; }
+  const { data, error } = await db.auth.signInWithPassword({ email, password: pwd });
+  if (error) { showAuthError(error.message); return; }
+  const u = data.user;
+  saveUser({ name: u.user_metadata?.name || email.split("@")[0], nickname: u.user_metadata?.nickname || "", email: u.email });
+  hideAuthModal();
+  await pullFromCloud(u);
+};
+
+window.authSignup = async function() {
+  const fname = document.getElementById("signup-fname").value.trim();
+  const nick  = document.getElementById("signup-nick").value.trim();
+  const email = document.getElementById("signup-email").value.trim();
+  const pwd   = document.getElementById("signup-password").value;
+  if (!fname || !email || !pwd) { showAuthError("Name, email and password required."); return; }
+  if (pwd.length < 8) { showAuthError("Password must be at least 8 characters."); return; }
+  const { data, error } = await db.auth.signUp({ email, password: pwd, options: { data: { name: fname, nickname: nick } } });
+  if (error) { showAuthError(error.message); return; }
+  saveUser({ name: fname, nickname: nick, email });
+  hideAuthModal();
+  showToast("Welcome to FlowNote, " + (nick||fname) + "! 🐸", "success");
+};
+
+window.authGoogle = async function() {
+  const { error } = await db.auth.signInWithOAuth({ provider: "google", options: { redirectTo: window.location.href } });
+  if (error) showToast("Google sign-in error: " + error.message, "info");
+};
+
+window.authSignOut = async function() {
+  await db.auth.signOut();
+  currentUser = null;
+  localStorage.removeItem("flownote_user");
+  const av = document.querySelector(".avatar");
+  if (av) { av.textContent = "JS"; av.onclick = showAuthModal; }
+  const bar = document.getElementById("auth-user-bar");
+  if (bar) bar.remove();
+  showToast("Signed out. See you tomorrow!", "info");
+};
+
+(async () => {
+  const { data: { session } } = await db.auth.getSession();
+  if (session) {
+    const u = session.user;
+    saveUser({ name: u.user_metadata?.name || u.email.split("@")[0], nickname: u.user_metadata?.nickname || "", email: u.email });
+    await pullFromCloud(u);
+  }
+  db.auth.onAuthStateChange(async (event, session) => {
+    if (event === "SIGNED_IN" && session) {
+      const u = session.user;
+      saveUser({ name: u.user_metadata?.name || u.email.split("@")[0], nickname: u.user_metadata?.nickname || "", email: u.email });
+      hideAuthModal();
+      await pullFromCloud(u);
+    }
+  });
+})();
+</script>
 </body>
 </html>
