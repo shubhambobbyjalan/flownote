@@ -1,746 +1,514 @@
 // ═══════════════════════════════════════════════════════════════════
-// FlowNote — app.js  v3.0  (Supabase auth + real-time data sync)
+// FlowNote — app.js  v3.1  (Supabase auth, global onclick compatible)
 // ═══════════════════════════════════════════════════════════════════
 
-import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+// Load Supabase via CDN (ESM) — injected dynamically so no module type needed
+(async () => {
+  // ── Load Supabase ──────────────────────────────────────────────
+  const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
 
-// ── Config ───────────────────────────────────────────────────────────
-const SUPABASE_URL  = 'https://twwlwvlsrheyfiexmfvo.supabase.co';
-const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR3d2x3dmxzcmhleWZpZXhtZnZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAzMzc0ODQsImV4cCI6MjA5NTkxMzQ4NH0.YndWwVZaijZOtpYK8qh3keCWU0I75TH3qaK7yrAQ0IQ';
+  const SUPABASE_URL  = 'https://twwlwvlsrheyfiexmfvo.supabase.co';
+  const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR3d2x3dmxzcmhleWZpZXhtZnZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAzMzc0ODQsImV4cCI6MjA5NTkxMzQ4NH0.YndWwVZaijZOtpYK8qh3keCWU0I75TH3qaK7yrAQ0IQ';
+  const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
 
-const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
+  // ── State ──────────────────────────────────────────────────────
+  let currentUser   = null;
+  let currentNote   = null;
+  let notes         = [];
+  let todos         = [];
+  let calEvents     = [];
+  let profile       = null;
+  let activeTag     = null;
+  let todayOffset   = 0;
+  let lightMode     = false;
 
-// ── State ─────────────────────────────────────────────────────────────
-let currentUser   = null;
-let currentNote   = null;   // { id, title, content, tag }
-let notes         = [];
-let todos         = [];
-let calEvents     = [];
-let profile       = null;
-let activeSection = 'notes';
-let activeTag     = null;
-let todayOffset   = 0;      // for calendar week nav
-let lightMode     = false;
+  // ── DOM helpers ────────────────────────────────────────────────
+  const qs    = s => document.querySelector(s);
+  const qsAll = s => [...document.querySelectorAll(s)];
+  const val   = s => qs(s)?.value?.trim() ?? '';
+  const on    = (s, ev, fn) => qs(s)?.addEventListener(ev, fn);
 
-// ═══════════════════════════════════════════════════════════════════
-// BOOT
-// ═══════════════════════════════════════════════════════════════════
-document.addEventListener('DOMContentLoaded', async () => {
-  applyTheme();
-  setupNavListeners();
-  setupAuthFormListeners();
-  setupNoteEditorListeners();
-  setupTodoListeners();
-  setupCalListeners();
-  setupSettingsListeners();
-  setupQuickCapture();
-
-  // Handle OAuth redirect (Google sign-in callback)
-  const { data: { session } } = await sb.auth.getSession();
-  if (session) {
-    await onSignedIn(session.user);
-  } else {
-    showAuthModal();
-  }
-
-  // Listen for auth state changes (e.g. after Google OAuth redirect)
-  sb.auth.onAuthStateChange(async (event, session) => {
-    if (event === 'SIGNED_IN' && session) {
-      await onSignedIn(session.user);
-    }
-    if (event === 'SIGNED_OUT') {
-      onSignedOut();
-    }
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════
-// AUTH
-// ═══════════════════════════════════════════════════════════════════
-async function onSignedIn(user) {
-  currentUser = user;
-  hideAuthModal();
-  await loadProfile();
-  await loadNotes();
-  await loadTodos();
-  await loadCalEvents();
-  renderAll();
-  incrementStreakToday();
-}
-
-function onSignedOut() {
-  currentUser = null;
-  profile     = null;
-  notes       = [];
-  todos       = [];
-  calEvents   = [];
-  showAuthModal();
-}
-
-// ── Auth modal visibility ─────────────────────────────────────────
-function showAuthModal() {
-  const modal = qs('#auth-modal');
-  if (modal) modal.style.display = 'flex';
-  const app = qs('#app');
-  if (app) app.style.display = 'none';
-}
-
-function hideAuthModal() {
-  const modal = qs('#auth-modal');
-  if (modal) modal.style.display = 'none';
-  const app = qs('#app');
-  if (app) app.style.display = '';
-}
-
-// ── Auth form listeners ───────────────────────────────────────────
-function setupAuthFormListeners() {
-  // Tab switching: sign-in ↔ create account
-  onAll('.auth-tab', 'click', e => {
-    const tab = e.currentTarget.dataset.tab;
-    qsAll('.auth-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
-    qsAll('.auth-pane').forEach(p => p.classList.toggle('active', p.dataset.pane === tab));
-  });
-
-  // Sign in with email/password
-  on('#btn-signin', 'click', async () => {
-    const email    = val('#signin-email');
-    const password = val('#signin-password');
-    const { error } = await sb.auth.signInWithPassword({ email, password });
-    if (error) showToast('❌ ' + error.message, 'error');
-  });
-
-  // Create account
-  on('#btn-signup', 'click', async () => {
-    const name     = val('#signup-name');
-    const nickname = val('#signup-nickname');
-    const email    = val('#signup-email');
-    const password = val('#signup-password');
-    const { error } = await sb.auth.signUp({
-      email, password,
-      options: { data: { name, nickname } }
-    });
-    if (error) showToast('❌ ' + error.message, 'error');
-    else showToast('✅ Check your email to confirm your account!');
-  });
-
-  // Google OAuth
-  onAll('.btn-google', 'click', async () => {
+  // ═══════════════════════════════════════════════════════════════
+  // GLOBAL AUTH FUNCTIONS (called by onclick in index.html)
+  // ═══════════════════════════════════════════════════════════════
+  window.authGoogle = async () => {
     const { error } = await sb.auth.signInWithOAuth({
       provider: 'google',
       options: { redirectTo: window.location.origin }
     });
-    if (error) showToast('❌ ' + error.message, 'error');
-  });
-
-  // Sign out
-  on('#btn-signout', 'click', async () => {
-    await sb.auth.signOut();
-  });
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// PROFILE & STREAK
-// ═══════════════════════════════════════════════════════════════════
-async function loadProfile() {
-  if (!currentUser) return;
-  const { data } = await sb.from('profiles').select('*').eq('id', currentUser.id).single();
-  if (data) {
-    profile   = data;
-    lightMode = data.settings?.lightmode ?? false;
-    applyTheme();
-  }
-}
-
-async function incrementStreakToday() {
-  if (!currentUser) return;
-  await sb.rpc('increment_streak', { uid: currentUser.id });
-  // Reload profile to get updated streak
-  await loadProfile();
-  renderStreak();
-}
-
-function renderStreak() {
-  const count = profile?.streak_count ?? 0;
-  qsAll('.streak-count').forEach(el => el.textContent = count);
-  qsAll('.streak-label').forEach(el => el.textContent = count + ' days in a row');
-  // Flame emoji in header
-  const flame = qs('#streak-flame');
-  if (flame) flame.textContent = '🔥 ' + count + ' day streak';
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// NOTES
-// ═══════════════════════════════════════════════════════════════════
-async function loadNotes() {
-  if (!currentUser) return;
-  const { data } = await sb.from('notes')
-    .select('*')
-    .eq('user_id', currentUser.id)
-    .order('modified_at', { ascending: false });
-  notes = data ?? [];
-}
-
-async function saveNote() {
-  if (!currentUser || !currentNote) return;
-  const payload = {
-    user_id    : currentUser.id,
-    title      : currentNote.title   || '',
-    content    : currentNote.content || '',
-    tag        : currentNote.tag     || null,
-    modified_at: new Date().toISOString()
+    if (error) showAuthError(error.message);
   };
-  if (currentNote.id) {
-    await sb.from('notes').update(payload).eq('id', currentNote.id);
-  } else {
-    const { data } = await sb.from('notes').insert(payload).select().single();
-    if (data) currentNote.id = data.id;
-  }
-  await loadNotes();
-  renderNotesList();
-  showToast('✓ Note saved');
-}
 
-async function deleteNote(id) {
-  await sb.from('notes').delete().eq('id', id);
-  if (currentNote?.id === id) currentNote = null;
-  await loadNotes();
-  renderNotesList();
-  renderNoteEditor();
-}
+  window.authLogin = async () => {
+    const email    = val('#login-email');
+    const password = val('#login-password');
+    if (!email || !password) return showAuthError('Please enter email and password.');
+    const { error } = await sb.auth.signInWithPassword({ email, password });
+    if (error) showAuthError(error.message);
+  };
 
-function renderNotesList() {
-  const container = qs('#notes-list');
-  if (!container) return;
-  const filtered = activeTag ? notes.filter(n => n.tag === activeTag) : notes;
-  const count    = qs('#notes-count');
-  if (count) count.textContent = notes.length;
-
-  container.innerHTML = filtered.length === 0
-    ? '<p class="empty-state">No notes yet. Hit ＋ to start.</p>'
-    : filtered.map(n => `
-        <div class="note-item ${currentNote?.id === n.id ? 'active' : ''}" data-id="${n.id}">
-          <div class="note-item-title">${escHtml(n.title || 'Untitled')}</div>
-          <div class="note-item-preview">${escHtml((n.content || '').slice(0, 60))}</div>
-          ${n.tag ? `<span class="tag tag-${n.tag}">● ${n.tag}</span>` : ''}
-        </div>`).join('');
-
-  container.querySelectorAll('.note-item').forEach(el => {
-    el.addEventListener('click', () => {
-      const note = notes.find(n => n.id == el.dataset.id);
-      if (note) { currentNote = { ...note }; renderNoteEditor(); renderNotesList(); }
+  window.authSignup = async () => {
+    const name     = val('#signup-fname');
+    const nickname = val('#signup-nick');
+    const email    = val('#signup-email');
+    const password = val('#signup-password');
+    if (!name || !email || !password) return showAuthError('Please fill in all fields.');
+    if (password.length < 8) return showAuthError('Password must be at least 8 characters.');
+    const { error } = await sb.auth.signUp({
+      email, password,
+      options: { data: { name, nickname } }
     });
-  });
-}
+    if (error) showAuthError(error.message);
+    else showAuthError('✅ Check your email to confirm your account!');
+  };
 
-function renderNoteEditor() {
-  const titleEl   = qs('#note-title');
-  const contentEl = qs('#note-content');
-  const tagEls    = qsAll('.tag-btn');
-  const deleteBtn = qs('#btn-delete-note');
+  window.authSignOut = async () => {
+    await sb.auth.signOut();
+  };
 
-  if (!currentNote) {
-    if (titleEl)   titleEl.value = '';
-    if (contentEl) contentEl.value = '';
-    tagEls.forEach(b => b.classList.remove('active'));
-    if (deleteBtn) deleteBtn.style.display = 'none';
-    return;
+  window.switchAuthTab = (tab, btn) => {
+    qs('#auth-login').style.display  = tab === 'login'  ? '' : 'none';
+    qs('#auth-signup').style.display = tab === 'signup' ? '' : 'none';
+    qsAll('.auth-tab').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  };
+
+  function showAuthError(msg) {
+    const el = qs('#auth-error');
+    if (el) { el.textContent = msg; el.style.display = ''; }
   }
-  if (titleEl)   titleEl.value = currentNote.title   || '';
-  if (contentEl) contentEl.value = currentNote.content || '';
-  tagEls.forEach(b => b.classList.toggle('active', b.dataset.tag === currentNote.tag));
-  if (deleteBtn) deleteBtn.style.display = '';
-}
 
-function setupNoteEditorListeners() {
-  on('#btn-new-note', 'click', () => {
-    currentNote = { title: '', content: '', tag: null };
-    renderNoteEditor();
-    renderNotesList();
-  });
+  // ═══════════════════════════════════════════════════════════════
+  // AUTH STATE
+  // ═══════════════════════════════════════════════════════════════
+  async function onSignedIn(user) {
+    currentUser = user;
+    // Hide auth overlay
+    const overlay = qs('#auth-overlay');
+    if (overlay) overlay.style.display = 'none';
+    // Load data
+    await loadProfile();
+    await Promise.all([loadNotes(), loadTodos(), loadCalEvents()]);
+    renderAll();
+    incrementStreakToday();
+  }
 
-  on('#btn-save-note', 'click', saveNote);
+  function onSignedOut() {
+    currentUser = null; profile = null;
+    notes = []; todos = []; calEvents = [];
+    const overlay = qs('#auth-overlay');
+    if (overlay) overlay.style.display = 'flex';
+  }
 
-  on('#btn-delete-note', 'click', () => {
-    if (currentNote?.id) deleteNote(currentNote.id);
-  });
+  // Boot: check existing session
+  const { data: { session } } = await sb.auth.getSession();
+  if (session) {
+    await onSignedIn(session.user);
+  } else {
+    // Show auth overlay
+    const overlay = qs('#auth-overlay');
+    if (overlay) overlay.style.display = 'flex';
+  }
 
-  on('#note-title', 'input', e => { if (currentNote) currentNote.title = e.target.value; });
-  on('#note-content', 'input', e => { if (currentNote) currentNote.content = e.target.value; });
-
-  onAll('.tag-btn', 'click', e => {
-    const tag = e.currentTarget.dataset.tag;
-    if (currentNote) {
-      currentNote.tag = currentNote.tag === tag ? null : tag;
-      qsAll('.tag-btn').forEach(b => b.classList.toggle('active', b.dataset.tag === currentNote.tag));
+  // Listen for auth changes (OAuth redirect callback)
+  sb.auth.onAuthStateChange(async (event, session) => {
+    if (event === 'SIGNED_IN' && session && !currentUser) {
+      await onSignedIn(session.user);
     }
+    if (event === 'SIGNED_OUT') onSignedOut();
   });
 
-  onAll('.filter-tag', 'click', e => {
-    const tag = e.currentTarget.dataset.tag;
-    activeTag = activeTag === tag ? null : tag;
+  // ═══════════════════════════════════════════════════════════════
+  // PROFILE & STREAK
+  // ═══════════════════════════════════════════════════════════════
+  async function loadProfile() {
+    const { data } = await sb.from('profiles').select('*').eq('id', currentUser.id).single();
+    if (data) { profile = data; lightMode = data.settings?.lightmode ?? false; applyTheme(); }
+  }
+
+  async function incrementStreakToday() {
+    await sb.rpc('increment_streak', { uid: currentUser.id });
+    await loadProfile();
+    renderStreak();
+  }
+
+  function renderStreak() {
+    const count = profile?.streak_count ?? 0;
+    qsAll('.streak-num').forEach(el => el.textContent = count);
+    const flame = qs('#header-streak');
+    if (flame) flame.textContent = '🔥 ' + count + ' day streak';
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // NOTES
+  // ═══════════════════════════════════════════════════════════════
+  async function loadNotes() {
+    const { data } = await sb.from('notes').select('*')
+      .eq('user_id', currentUser.id).order('modified_at', { ascending: false });
+    notes = data ?? [];
+  }
+
+  async function saveNote() {
+    if (!currentNote) return;
+    const payload = {
+      user_id: currentUser.id,
+      title: currentNote.title || '',
+      content: currentNote.content || '',
+      tag: currentNote.tag || null,
+      modified_at: new Date().toISOString()
+    };
+    if (currentNote.id) {
+      await sb.from('notes').update(payload).eq('id', currentNote.id);
+    } else {
+      const { data } = await sb.from('notes').insert(payload).select().single();
+      if (data) currentNote.id = data.id;
+    }
+    await loadNotes();
+    renderNotesList();
+    showToast('✓ Saved');
+  }
+
+  async function deleteNote(id) {
+    await sb.from('notes').delete().eq('id', id);
+    currentNote = null;
+    await loadNotes();
+    renderNotesList();
+    renderEditor();
+  }
+
+  function renderNotesList() {
+    const list = qs('#notes-list');
+    if (!list) return;
+    const filtered = activeTag ? notes.filter(n => n.tag === activeTag) : notes;
+    const countEl  = qs('#notes-count');
+    if (countEl) countEl.textContent = notes.length;
+
+    list.innerHTML = filtered.length === 0
+      ? '<div style="padding:20px;color:var(--text3);text-align:center;">No notes yet — hit ＋</div>'
+      : filtered.map(n => `
+          <div class="note-row ${currentNote?.id === n.id ? 'active' : ''}" data-id="${n.id}">
+            <div class="note-row-title">${esc(n.title || 'Untitled')}</div>
+            <div class="note-row-preview">${esc((n.content||'').slice(0,55))}</div>
+            ${n.tag ? `<span class="ntag ntag-${n.tag}">● ${n.tag}</span>` : ''}
+          </div>`).join('');
+
+    list.querySelectorAll('.note-row').forEach(el =>
+      el.addEventListener('click', () => {
+        const n = notes.find(x => x.id == el.dataset.id);
+        if (n) { currentNote = { ...n }; renderNotesList(); renderEditor(); }
+      }));
+  }
+
+  function renderEditor() {
+    const title   = qs('#note-title');
+    const content = qs('#note-content');
+    const delBtn  = qs('#btn-del-note');
+    if (!currentNote) {
+      if (title)   title.value   = '';
+      if (content) content.value = '';
+      if (delBtn)  delBtn.style.display = 'none';
+      return;
+    }
+    if (title)   title.value   = currentNote.title   || '';
+    if (content) content.value = currentNote.content || '';
+    if (delBtn)  delBtn.style.display = '';
+    qsAll('.tag-pill').forEach(b =>
+      b.classList.toggle('active', b.dataset.tag === currentNote.tag));
+  }
+
+  // Wire note editor
+  on('#btn-new-note',  'click', () => { currentNote = { title:'', content:'', tag:null }; renderEditor(); renderNotesList(); });
+  on('#btn-save-note', 'click', saveNote);
+  on('#btn-del-note',  'click', () => currentNote?.id && deleteNote(currentNote.id));
+  on('#note-title',    'input', e => { if (currentNote) currentNote.title   = e.target.value; });
+  on('#note-content',  'input', e => { if (currentNote) currentNote.content = e.target.value; });
+
+  qsAll('.tag-pill').forEach(btn => btn.addEventListener('click', () => {
+    if (!currentNote) return;
+    currentNote.tag = currentNote.tag === btn.dataset.tag ? null : btn.dataset.tag;
+    qsAll('.tag-pill').forEach(b => b.classList.toggle('active', b.dataset.tag === currentNote.tag));
+  }));
+
+  qsAll('.filter-tag').forEach(btn => btn.addEventListener('click', () => {
+    activeTag = activeTag === btn.dataset.tag ? null : btn.dataset.tag;
     qsAll('.filter-tag').forEach(b => b.classList.toggle('active', b.dataset.tag === activeTag));
     renderNotesList();
-  });
+  }));
 
-  // Formatting toolbar
-  on('#fmt-bold',   'click', () => wrapSelection('**', '**'));
-  on('#fmt-italic', 'click', () => wrapSelection('_', '_'));
-  on('#fmt-ul',     'click', () => prefixLine('• '));
-  on('#fmt-check',  'click', () => prefixLine('☑ '));
-  on('#fmt-code',   'click', () => wrapSelection('`', '`'));
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// TODOS
-// ═══════════════════════════════════════════════════════════════════
-async function loadTodos() {
-  if (!currentUser) return;
-  const { data } = await sb.from('todos')
-    .select('*')
-    .eq('user_id', currentUser.id)
-    .order('created_at', { ascending: false });
-  todos = data ?? [];
-}
-
-async function addTodo(text, priority) {
-  if (!currentUser || !text.trim()) return;
-  await sb.from('todos').insert({
-    user_id : currentUser.id,
-    text    : text.trim(),
-    priority: priority || '2'
-  });
-  await loadTodos();
-  renderTodos();
-}
-
-async function toggleTodo(id) {
-  const todo = todos.find(t => t.id === id);
-  if (!todo) return;
-  await sb.from('todos').update({
-    done   : !todo.done,
-    done_at: !todo.done ? new Date().toISOString() : null
-  }).eq('id', id);
-  if (!todo.done) {
-    playDoneSound();
-    await incrementStreakToday();
+  // ═══════════════════════════════════════════════════════════════
+  // TODOS
+  // ═══════════════════════════════════════════════════════════════
+  async function loadTodos() {
+    const { data } = await sb.from('todos').select('*')
+      .eq('user_id', currentUser.id).order('created_at', { ascending: false });
+    todos = data ?? [];
   }
-  await loadTodos();
-  renderTodos();
-}
 
-async function deleteTodo(id) {
-  await sb.from('todos').delete().eq('id', id);
-  await loadTodos();
-  renderTodos();
-}
+  async function addTodo(text, priority) {
+    if (!text.trim()) return;
+    await sb.from('todos').insert({ user_id: currentUser.id, text: text.trim(), priority: priority || '2' });
+    await loadTodos(); renderTodos();
+  }
 
-function renderTodos() {
-  const container = qs('#todos-list');
-  if (!container) return;
+  async function toggleTodo(id) {
+    const t = todos.find(x => x.id === id);
+    if (!t) return;
+    await sb.from('todos').update({ done: !t.done, done_at: !t.done ? new Date().toISOString() : null }).eq('id', id);
+    if (!t.done) { playDone(); await incrementStreakToday(); }
+    await loadTodos(); renderTodos();
+  }
 
-  const frog  = todos.filter(t => t.priority === 'frog' && !t.done);
-  const open  = todos.filter(t => t.priority !== 'frog' && !t.done);
-  const done  = todos.filter(t => t.done);
-  const total = todos.filter(t => !t.done).length;
-  const pct   = todos.length ? Math.round((done.length / todos.length) * 100) : 0;
+  async function deleteTodo(id) {
+    await sb.from('todos').delete().eq('id', id);
+    await loadTodos(); renderTodos();
+  }
 
-  const qs2   = qs('#todos-count');
-  if (qs2) qs2.textContent = total;
-  const prog  = qs('#todo-progress');
-  if (prog) prog.textContent = `Today's focus ${pct}%`;
-  const bar   = qs('#todo-progress-bar');
-  if (bar) bar.style.width = pct + '%';
+  function renderTodos() {
+    const list = qs('#todos-list');
+    if (!list) return;
+    const open = todos.filter(t => !t.done);
+    const done = todos.filter(t =>  t.done);
+    const pct  = todos.length ? Math.round(done.length / todos.length * 100) : 0;
 
-  // Frog task
-  const frogEl = qs('#frog-task');
-  if (frogEl) frogEl.textContent = frog.length ? frog[0].text : '';
-  const frogCount = qs('#frog-count');
-  if (frogCount) frogCount.textContent = frog.length;
+    const countEl = qs('#todos-count');
+    if (countEl) countEl.textContent = open.length;
+    const progEl  = qs('#todo-progress-pct');
+    if (progEl)  progEl.textContent  = pct + '%';
+    const barEl   = qs('#todo-progress-bar');
+    if (barEl)   barEl.style.width   = pct + '%';
 
-  container.innerHTML = [...frog, ...open, ...done].map(t => `
-    <div class="todo-item ${t.done ? 'done' : ''} priority-${t.priority}" data-id="${t.id}">
-      <span class="todo-check" data-id="${t.id}">${t.done ? '✓' : '○'}</span>
-      <span class="todo-text">${escHtml(t.text)}</span>
-      ${t.priority === 'frog' ? '<span class="frog-badge">🐸</span>' : ''}
-      <span class="todo-delete" data-id="${t.id}">🗑</span>
-    </div>`).join('');
+    const frogEl  = qs('#frog-task-text');
+    const frog    = todos.find(t => t.priority === 'frog' && !t.done);
+    if (frogEl)  frogEl.textContent  = frog ? frog.text : '';
 
-  container.querySelectorAll('.todo-check').forEach(el =>
-    el.addEventListener('click', () => toggleTodo(Number(el.dataset.id))));
-  container.querySelectorAll('.todo-delete').forEach(el =>
-    el.addEventListener('click', () => deleteTodo(Number(el.dataset.id))));
-}
+    list.innerHTML = [...open, ...done].map(t => `
+      <div class="todo-item ${t.done ? 'done' : ''}" data-id="${t.id}">
+        <span class="todo-cb" data-id="${t.id}">${t.done ? '✓' : '○'}</span>
+        <span class="todo-txt">${esc(t.text)}</span>
+        ${t.priority === 'frog' ? '<span style="font-size:14px;">🐸</span>' : ''}
+        <span class="todo-del" data-id="${t.id}">🗑</span>
+      </div>`).join('');
 
-function setupTodoListeners() {
+    list.querySelectorAll('.todo-cb').forEach(el =>
+      el.addEventListener('click', () => toggleTodo(Number(el.dataset.id))));
+    list.querySelectorAll('.todo-del').forEach(el =>
+      el.addEventListener('click', () => deleteTodo(Number(el.dataset.id))));
+  }
+
   on('#btn-add-todo', 'click', () => {
-    const input    = qs('#todo-input');
-    const priority = qs('#todo-priority')?.value || '2';
-    if (input?.value.trim()) {
-      addTodo(input.value, priority);
-      input.value = '';
+    const inp = qs('#todo-input');
+    const pri = qs('#todo-priority')?.value || '2';
+    if (inp?.value.trim()) { addTodo(inp.value, pri); inp.value = ''; }
+  });
+  on('#todo-input', 'keydown', e => { if (e.key === 'Enter') qs('#btn-add-todo')?.click(); });
+
+  // ═══════════════════════════════════════════════════════════════
+  // CALENDAR
+  // ═══════════════════════════════════════════════════════════════
+  async function loadCalEvents() {
+    const { data } = await sb.from('cal_events').select('*')
+      .eq('user_id', currentUser.id).order('event_date', { ascending: true });
+    calEvents = data ?? [];
+  }
+
+  async function saveCalEvent(ev) {
+    await sb.from('cal_events').insert({ ...ev, user_id: currentUser.id });
+    await loadCalEvents(); renderCalendar();
+    showToast('✓ Event saved');
+  }
+
+  async function deleteCalEvent(id) {
+    await sb.from('cal_events').delete().eq('id', id);
+    await loadCalEvents(); renderCalendar();
+  }
+
+  function renderCalendar() {
+    const list = qs('#cal-events-list');
+    if (!list) return;
+    const d = new Date();
+    d.setDate(d.getDate() + todayOffset);
+    const dateStr  = d.toISOString().split('T')[0];
+    const labelEl  = qs('#cal-date-label');
+    if (labelEl) labelEl.textContent = d.toLocaleDateString('en-IN', { weekday:'long', month:'long', day:'numeric' });
+
+    const todayEvs = calEvents.filter(e => e.event_date === dateStr);
+    list.innerHTML = todayEvs.length === 0
+      ? '<div style="padding:20px;color:var(--text3);text-align:center;">No events today</div>'
+      : todayEvs.map(e => `
+          <div class="cal-ev" style="border-left:3px solid var(--accent)">
+            <div class="cal-ev-title">${esc(e.title)}</div>
+            ${e.start_hour != null ? `<div class="cal-ev-time">${fmtHour(e.start_hour)} – ${fmtHour(e.end_hour)}</div>` : ''}
+            <span class="cal-ev-del" data-id="${e.id}">✕</span>
+          </div>`).join('');
+
+    list.querySelectorAll('.cal-ev-del').forEach(el =>
+      el.addEventListener('click', () => deleteCalEvent(Number(el.dataset.id))));
+
+    const upEl = qs('#cal-upcoming');
+    if (upEl) {
+      const upcoming = calEvents.filter(e => e.event_date > dateStr).slice(0, 5);
+      upEl.innerHTML = upcoming.map(e =>
+        `<div class="upcoming-ev"><span>${esc(e.title)}</span><span>${e.event_date}</span></div>`
+      ).join('') || '<div style="color:var(--text3);padding:10px 0;">No upcoming events</div>';
     }
-  });
-
-  on('#todo-input', 'keydown', e => {
-    if (e.key === 'Enter') qs('#btn-add-todo')?.click();
-  });
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// CALENDAR EVENTS
-// ═══════════════════════════════════════════════════════════════════
-async function loadCalEvents() {
-  if (!currentUser) return;
-  const { data } = await sb.from('cal_events')
-    .select('*')
-    .eq('user_id', currentUser.id)
-    .order('event_date', { ascending: true });
-  calEvents = data ?? [];
-}
-
-async function saveCalEvent(ev) {
-  if (!currentUser) return;
-  const payload = { ...ev, user_id: currentUser.id };
-  if (ev.id) {
-    await sb.from('cal_events').update(payload).eq('id', ev.id);
-  } else {
-    await sb.from('cal_events').insert(payload);
   }
-  await loadCalEvents();
-  renderCalendar();
-  showToast('✓ Event saved to Google Calendar');
-}
 
-async function deleteCalEvent(id) {
-  await sb.from('cal_events').delete().eq('id', id);
-  await loadCalEvents();
-  renderCalendar();
-}
-
-function renderCalendar() {
-  const container = qs('#cal-events-list');
-  if (!container) return;
-
-  const today = new Date();
-  today.setDate(today.getDate() + todayOffset);
-  const dateStr = today.toISOString().split('T')[0];
-
-  const todayEvents = calEvents.filter(e => e.event_date === dateStr);
-  const upcoming    = calEvents.filter(e => e.event_date > dateStr).slice(0, 5);
-
-  const dateLabel = qs('#cal-date-label');
-  if (dateLabel) dateLabel.textContent = today.toLocaleDateString('en-IN', { weekday: 'long', month: 'long', day: 'numeric' });
-
-  container.innerHTML = todayEvents.length === 0
-    ? '<p class="empty-state">No events today. Hit ＋ to add one.</p>'
-    : todayEvents.map(e => `
-        <div class="cal-event color-${e.color}" data-id="${e.id}">
-          <div class="cal-event-title">${escHtml(e.title)}</div>
-          ${e.start_hour ? `<div class="cal-event-time">${formatHour(e.start_hour)} – ${formatHour(e.end_hour)}</div>` : ''}
-          <span class="cal-event-delete" data-id="${e.id}">✕</span>
-        </div>`).join('');
-
-  container.querySelectorAll('.cal-event-delete').forEach(el =>
-    el.addEventListener('click', () => deleteCalEvent(Number(el.dataset.id))));
-
-  // Upcoming
-  const upEl = qs('#cal-upcoming');
-  if (upEl) {
-    upEl.innerHTML = upcoming.map(e => `
-      <div class="upcoming-event">
-        <span>${escHtml(e.title)}</span>
-        <span>${e.event_date}</span>
-      </div>`).join('') || '<p class="empty-state">No upcoming events.</p>';
-  }
-}
-
-function setupCalListeners() {
-  on('#btn-cal-prev', 'click', () => { todayOffset--; renderCalendar(); });
-  on('#btn-cal-next', 'click', () => { todayOffset++; renderCalendar(); });
+  on('#btn-cal-prev',  'click', () => { todayOffset--; renderCalendar(); });
+  on('#btn-cal-next',  'click', () => { todayOffset++; renderCalendar(); });
   on('#btn-cal-today', 'click', () => { todayOffset = 0; renderCalendar(); });
 
   on('#btn-new-event', 'click', () => {
-    const modal = qs('#event-modal');
-    if (modal) modal.style.display = 'flex';
+    const m = qs('#event-modal');
+    if (m) m.style.display = 'flex';
   });
-
   on('#btn-cancel-event', 'click', () => {
-    const modal = qs('#event-modal');
-    if (modal) modal.style.display = 'none';
+    const m = qs('#event-modal');
+    if (m) m.style.display = 'none';
   });
-
   on('#btn-save-event', 'click', async () => {
-    const title      = val('#event-title');
-    const date       = val('#event-date');
-    const startRaw   = val('#event-start');
-    const endRaw     = val('#event-end');
-    const colorEl    = qs('#event-color');
-    const notesVal   = val('#event-notes');
-    if (!title || !date) return showToast('Title and date required', 'error');
-
-    const toHour = t => {
-      if (!t) return null;
-      const [h, m] = t.split(':').map(Number);
-      return h + m / 60;
-    };
-
+    const title = val('#event-title');
+    const date  = val('#event-date');
+    if (!title || !date) return showToast('Title and date required', true);
+    const toH = t => { if (!t) return null; const [h,m] = t.split(':').map(Number); return h + m/60; };
     await saveCalEvent({
-      title     : title,
-      event_date: date,
-      start_hour: toHour(startRaw),
-      end_hour  : toHour(endRaw),
-      color     : colorEl?.value || 'blue',
-      notes     : notesVal
+      title, event_date: date,
+      start_hour: toH(val('#event-start')),
+      end_hour:   toH(val('#event-end')),
+      color: qs('#event-color')?.value || 'blue',
+      notes: val('#event-notes')
     });
-    const modal = qs('#event-modal');
-    if (modal) modal.style.display = 'none';
-    // Clear form
+    const m = qs('#event-modal');
+    if (m) m.style.display = 'none';
     ['#event-title','#event-date','#event-start','#event-end','#event-notes']
-      .forEach(sel => { const el = qs(sel); if (el) el.value = ''; });
+      .forEach(s => { const el = qs(s); if (el) el.value = ''; });
   });
-}
 
-// ═══════════════════════════════════════════════════════════════════
-// SETTINGS
-// ═══════════════════════════════════════════════════════════════════
-async function saveSettings(key, value) {
-  if (!currentUser || !profile) return;
-  const settings = { ...profile.settings, [key]: value };
-  await sb.from('profiles').update({ settings }).eq('id', currentUser.id);
-  profile.settings = settings;
-}
+  // ═══════════════════════════════════════════════════════════════
+  // SETTINGS
+  // ═══════════════════════════════════════════════════════════════
+  async function saveSetting(key, value) {
+    if (!profile) return;
+    const settings = { ...profile.settings, [key]: value };
+    await sb.from('profiles').update({ settings }).eq('id', currentUser.id);
+    profile.settings = settings;
+  }
 
-function setupSettingsListeners() {
   on('#toggle-theme', 'click', async () => {
-    lightMode = !lightMode;
-    applyTheme();
-    await saveSettings('lightmode', lightMode);
+    lightMode = !lightMode; applyTheme();
+    await saveSetting('lightmode', lightMode);
   });
 
   on('#btn-export', 'click', () => {
-    const data = JSON.stringify({ notes, todos, calEvents }, null, 2);
-    const blob = new Blob([data], { type: 'application/json' });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href     = url;
-    a.download = 'flownote-export.json';
+    const blob = new Blob([JSON.stringify({ notes, todos, calEvents }, null, 2)], { type: 'application/json' });
+    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'flownote-export.json' });
     a.click();
   });
 
   on('#btn-reset-streak', 'click', async () => {
-    if (!confirm('Reset your streak? This cannot be undone.')) return;
+    if (!confirm('Reset your streak? Cannot be undone.')) return;
     await sb.from('profiles').update({ streak_count: 0, streak_last_active: null }).eq('id', currentUser.id);
-    await loadProfile();
-    renderStreak();
-    showToast('Streak reset.');
+    await loadProfile(); renderStreak(); showToast('Streak reset');
   });
 
-  on('#btn-use-freeze', 'click', async () => {
-    showToast('❄️ Freeze used! Your streak is safe for today.');
-  });
+  on('#btn-use-freeze', 'click', () => showToast('❄️ Freeze used! Streak protected'));
 
-  // Toggle settings switches
-  const toggleMap = {
-    '#toggle-reminder'   : 'reminder',
-    '#toggle-motivation' : 'motivation',
-    '#toggle-autoblock'  : 'autoblock',
-    '#toggle-meetingprep': 'meetingprep',
-    '#toggle-vibration'  : 'vibration',
-    '#toggle-sound'      : 'sound'
-  };
-  Object.entries(toggleMap).forEach(([sel, key]) => {
-    on(sel, 'change', e => saveSettings(key, e.target.checked));
-  });
-}
+  on('#btn-signout', 'click', () => sb.auth.signOut());
 
-// ═══════════════════════════════════════════════════════════════════
-// QUICK CAPTURE (FAB)
-// ═══════════════════════════════════════════════════════════════════
-function setupQuickCapture() {
-  on('#btn-quick-frog', 'click', async () => {
-    const text = val('#quick-input');
-    if (!text) return;
-    await addTodo(text, 'frog');
-    qs('#quick-input').value = '';
-    closeQuickCapture();
-  });
+  // Settings toggles
+  [['#toggle-reminder','reminder'],['#toggle-motivation','motivation'],
+   ['#toggle-autoblock','autoblock'],['#toggle-meetingprep','meetingprep'],
+   ['#toggle-vibration','vibration'],['#toggle-sound','sound']]
+  .forEach(([sel, key]) => on(sel, 'change', e => saveSetting(key, e.target.checked)));
 
-  on('#btn-quick-note', 'click', async () => {
-    const text = val('#quick-input');
-    if (!text) return;
-    currentNote = { title: text.slice(0, 40), content: text, tag: null };
-    await saveNote();
-    qs('#quick-input').value = '';
-    closeQuickCapture();
-    switchSection('notes');
+  // ═══════════════════════════════════════════════════════════════
+  // QUICK CAPTURE
+  // ═══════════════════════════════════════════════════════════════
+  on('#btn-fab', 'click', () => {
+    const p = qs('#quick-capture');
+    if (p) { const open = p.classList.toggle('open'); if (open) qs('#quick-input')?.focus(); }
   });
-
-  on('#btn-quick-task', 'click', async () => {
+  on('#btn-close-quick', 'click', () => qs('#quick-capture')?.classList.remove('open'));
+  on('#btn-quick-save',  'click', async () => {
     const text = val('#quick-input');
     if (!text) return;
     await addTodo(text, '2');
     qs('#quick-input').value = '';
-    closeQuickCapture();
+    qs('#quick-capture')?.classList.remove('open');
   });
-
-  on('#btn-quick-save', 'click', () => {
-    const text = val('#quick-input');
-    if (text) qs('#btn-quick-task')?.click();
-  });
-
   on('#quick-input', 'keydown', e => {
     if (e.key === 'Enter') qs('#btn-quick-save')?.click();
-    if (e.key === 'Escape') closeQuickCapture();
+    if (e.key === 'Escape') qs('#quick-capture')?.classList.remove('open');
   });
 
-  on('#btn-fab', 'click', () => {
-    const panel = qs('#quick-capture');
-    if (panel) {
-      const open = panel.classList.toggle('open');
-      if (open) qs('#quick-input')?.focus();
+  // ═══════════════════════════════════════════════════════════════
+  // RENDER ALL
+  // ═══════════════════════════════════════════════════════════════
+  function renderAll() {
+    renderStreak();
+    renderNotesList();
+    renderEditor();
+    renderTodos();
+    renderCalendar();
+    renderSettingsProfile();
+  }
+
+  function renderSettingsProfile() {
+    const el = qs('#profile-name');
+    if (el) el.textContent = profile?.name || currentUser?.email || '';
+    const s = qs('#profile-streak-val');
+    if (s) s.textContent = profile?.streak_count ?? 0;
+    // Sync toggles
+    const map = { '#toggle-reminder':'reminder','#toggle-motivation':'motivation',
+      '#toggle-autoblock':'autoblock','#toggle-meetingprep':'meetingprep',
+      '#toggle-vibration':'vibration','#toggle-sound':'sound' };
+    const settings = profile?.settings || {};
+    Object.entries(map).forEach(([sel, key]) => {
+      const el = qs(sel); if (el) el.checked = settings[key] ?? true;
+    });
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // UTILITIES
+  // ═══════════════════════════════════════════════════════════════
+  function applyTheme() { document.body.classList.toggle('light-mode', lightMode); }
+
+  function playDone() {
+    if (!profile?.settings?.sound) return;
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator(), gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(440, ctx.currentTime + 0.1);
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+      osc.start(); osc.stop(ctx.currentTime + 0.3);
+    } catch(e) {}
+  }
+
+  function showToast(msg, isError = false) {
+    let t = qs('#toast');
+    if (!t) {
+      t = document.createElement('div');
+      t.id = 'toast';
+      t.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--accent,#6c63ff);color:#fff;padding:10px 20px;border-radius:8px;font-size:14px;z-index:9999;transition:opacity .3s;';
+      document.body.appendChild(t);
     }
-  });
-
-  on('#btn-close-quick', 'click', closeQuickCapture);
-}
-
-function closeQuickCapture() {
-  qs('#quick-capture')?.classList.remove('open');
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// NAVIGATION
-// ═══════════════════════════════════════════════════════════════════
-function setupNavListeners() {
-  onAll('[data-section]', 'click', e => {
-    switchSection(e.currentTarget.dataset.section);
-  });
-}
-
-function switchSection(section) {
-  activeSection = section;
-  qsAll('[data-section]').forEach(el =>
-    el.classList.toggle('active', el.dataset.section === section));
-  qsAll('.section-panel').forEach(el =>
-    el.classList.toggle('active', el.dataset.panel === section));
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// RENDER ALL
-// ═══════════════════════════════════════════════════════════════════
-function renderAll() {
-  renderStreak();
-  renderNotesList();
-  renderNoteEditor();
-  renderTodos();
-  renderCalendar();
-  renderSettingsProfile();
-}
-
-function renderSettingsProfile() {
-  const nameEl = qs('#profile-name');
-  if (nameEl) nameEl.textContent = profile?.name || currentUser?.email || '';
-  const streakEl = qs('#profile-streak');
-  if (streakEl) streakEl.textContent = profile?.streak_count ?? 0;
-
-  // Sync settings toggles to saved values
-  const s = profile?.settings || {};
-  const m = {
-    '#toggle-reminder'   : 'reminder',
-    '#toggle-motivation' : 'motivation',
-    '#toggle-autoblock'  : 'autoblock',
-    '#toggle-meetingprep': 'meetingprep',
-    '#toggle-vibration'  : 'vibration',
-    '#toggle-sound'      : 'sound'
-  };
-  Object.entries(m).forEach(([sel, key]) => {
-    const el = qs(sel);
-    if (el) el.checked = s[key] ?? true;
-  });
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// HELPERS
-// ═══════════════════════════════════════════════════════════════════
-function applyTheme() {
-  document.body.classList.toggle('light-mode', lightMode);
-}
-
-function playDoneSound() {
-  if (!profile?.settings?.sound) return;
-  try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.connect(gain); gain.connect(ctx.destination);
-    osc.frequency.setValueAtTime(880, ctx.currentTime);
-    osc.frequency.exponentialRampToValueAtTime(440, ctx.currentTime + 0.1);
-    gain.gain.setValueAtTime(0.3, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
-    osc.start(); osc.stop(ctx.currentTime + 0.3);
-  } catch (e) { /* audio not available */ }
-}
-
-function showToast(msg, type = 'success') {
-  const toast = qs('#toast');
-  if (!toast) {
-    const t = document.createElement('div');
-    t.id        = 'toast';
-    t.className = `toast ${type}`;
     t.textContent = msg;
-    document.body.appendChild(t);
-    setTimeout(() => t.remove(), 2800);
-    return;
+    t.style.background = isError ? '#e74c3c' : 'var(--accent, #6c63ff)';
+    t.style.opacity = '1';
+    clearTimeout(t._timer);
+    t._timer = setTimeout(() => t.style.opacity = '0', 2500);
   }
-  toast.textContent = msg;
-  toast.className   = `toast ${type} show`;
-  setTimeout(() => toast.classList.remove('show'), 2800);
-}
 
-function formatHour(h) {
-  if (h == null) return '';
-  const hh = Math.floor(h);
-  const mm = Math.round((h - hh) * 60);
-  const ampm = hh >= 12 ? 'PM' : 'AM';
-  return `${hh % 12 || 12}:${mm.toString().padStart(2,'0')} ${ampm}`;
-}
-
-function wrapSelection(before, after) {
-  const el = qs('#note-content');
-  if (!el) return;
-  const start = el.selectionStart, end = el.selectionEnd;
-  const sel   = el.value.slice(start, end);
-  el.value    = el.value.slice(0, start) + before + sel + after + el.value.slice(end);
-  el.focus();
-  if (currentNote) currentNote.content = el.value;
-}
-
-function prefixLine(prefix) {
-  const el = qs('#note-content');
-  if (!el) return;
-  const lines     = el.value.split('\n');
-  const pos       = el.selectionStart;
-  let  chars      = 0, lineIdx = 0;
-  for (let i = 0; i < lines.length; i++) {
-    chars += lines[i].length + 1;
-    if (chars >= pos) { lineIdx = i; break; }
+  function fmtHour(h) {
+    if (h == null) return '';
+    const hh = Math.floor(h), mm = Math.round((h - hh) * 60);
+    return `${hh % 12 || 12}:${mm.toString().padStart(2,'0')} ${hh >= 12 ? 'PM' : 'AM'}`;
   }
-  lines[lineIdx]  = prefix + lines[lineIdx];
-  el.value        = lines.join('\n');
-  if (currentNote) currentNote.content = el.value;
-}
 
-function escHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
+  function esc(str) {
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
 
-// DOM shortcuts
-const qs     = s => document.querySelector(s);
-const qsAll  = s => [...document.querySelectorAll(s)];
-const val    = s => qs(s)?.value?.trim() ?? '';
-const on     = (s, ev, fn) => qs(s)?.addEventListener(ev, fn);
-const onAll  = (s, ev, fn) => qsAll(s).forEach(el => el.addEventListener(ev, fn));
+})();
