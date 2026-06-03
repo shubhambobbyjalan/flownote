@@ -1,322 +1,514 @@
-// FlowNote — Supabase Integration Layer
-// Drop this file next to index.html and add <script type="module" src="/app.js"></script>
-// to the <head> of index.html AFTER your existing script tags.
+// ═══════════════════════════════════════════════════════════════════
+// FlowNote — app.js  v3.1  (Supabase auth, global onclick compatible)
+// ═══════════════════════════════════════════════════════════════════
 
-import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+// Load Supabase via CDN (ESM) — injected dynamically so no module type needed
+(async () => {
+  // ── Load Supabase ──────────────────────────────────────────────
+  const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
 
-// ── CONFIG — replace with your own values from supabase.com/dashboard ──────
-const SUPABASE_URL = 'YOUR_SUPABASE_URL';       // e.g. https://xyzabc.supabase.co
-const SUPABASE_KEY = 'YOUR_SUPABASE_ANON_KEY';  // eyJhbGci...
+  const SUPABASE_URL  = 'https://twwlwvlsrheyfiexmfvo.supabase.co';
+  const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR3d2x3dmxzcmhleWZpZXhtZnZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAzMzc0ODQsImV4cCI6MjA5NTkxMzQ4NH0.YndWwVZaijZOtpYK8qh3keCWU0I75TH3qaK7yrAQ0IQ';
+  const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
 
-export const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+  // ── State ──────────────────────────────────────────────────────
+  let currentUser   = null;
+  let currentNote   = null;
+  let notes         = [];
+  let todos         = [];
+  let calEvents     = [];
+  let profile       = null;
+  let activeTag     = null;
+  let todayOffset   = 0;
+  let lightMode     = false;
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  AUTH
-// ═══════════════════════════════════════════════════════════════════════════
+  // ── DOM helpers ────────────────────────────────────────────────
+  const qs    = s => document.querySelector(s);
+  const qsAll = s => [...document.querySelectorAll(s)];
+  const val   = s => qs(s)?.value?.trim() ?? '';
+  const on    = (s, ev, fn) => qs(s)?.addEventListener(ev, fn);
 
-export async function signUp({ email, password, name, nickname }) {
-  return await supabase.auth.signUp({
-    email, password,
-    options: { data: { name, nickname } }
-  });
-}
+  // ═══════════════════════════════════════════════════════════════
+  // GLOBAL AUTH FUNCTIONS (called by onclick in index.html)
+  // ═══════════════════════════════════════════════════════════════
+  window.authGoogle = async () => {
+    const { error } = await sb.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo: window.location.origin }
+    });
+    if (error) showAuthError(error.message);
+  };
 
-export async function signIn({ email, password }) {
-  return await supabase.auth.signInWithPassword({ email, password });
-}
+  window.authLogin = async () => {
+    const email    = val('#login-email');
+    const password = val('#login-password');
+    if (!email || !password) return showAuthError('Please enter email and password.');
+    const { error } = await sb.auth.signInWithPassword({ email, password });
+    if (error) showAuthError(error.message);
+  };
 
-export async function signInWithGoogle() {
-  return await supabase.auth.signInWithOAuth({
-    provider: 'google',
-    options: {
-      redirectTo: window.location.origin,
-      scopes: 'https://www.googleapis.com/auth/calendar.readonly'
+  window.authSignup = async () => {
+    const name     = val('#signup-fname');
+    const nickname = val('#signup-nick');
+    const email    = val('#signup-email');
+    const password = val('#signup-password');
+    if (!name || !email || !password) return showAuthError('Please fill in all fields.');
+    if (password.length < 8) return showAuthError('Password must be at least 8 characters.');
+    const { error } = await sb.auth.signUp({
+      email, password,
+      options: { data: { name, nickname } }
+    });
+    if (error) showAuthError(error.message);
+    else showAuthError('✅ Check your email to confirm your account!');
+  };
+
+  window.authSignOut = async () => {
+    await sb.auth.signOut();
+  };
+
+  window.switchAuthTab = (tab, btn) => {
+    qs('#auth-login').style.display  = tab === 'login'  ? '' : 'none';
+    qs('#auth-signup').style.display = tab === 'signup' ? '' : 'none';
+    qsAll('.auth-tab').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  };
+
+  function showAuthError(msg) {
+    const el = qs('#auth-error');
+    if (el) { el.textContent = msg; el.style.display = ''; }
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // AUTH STATE
+  // ═══════════════════════════════════════════════════════════════
+  async function onSignedIn(user) {
+    currentUser = user;
+    // Hide auth overlay
+    const overlay = qs('#auth-overlay');
+    if (overlay) overlay.style.display = 'none';
+    // Load data
+    await loadProfile();
+    await Promise.all([loadNotes(), loadTodos(), loadCalEvents()]);
+    renderAll();
+    incrementStreakToday();
+  }
+
+  function onSignedOut() {
+    currentUser = null; profile = null;
+    notes = []; todos = []; calEvents = [];
+    const overlay = qs('#auth-overlay');
+    if (overlay) overlay.style.display = 'flex';
+  }
+
+  // Boot: check existing session
+  const { data: { session } } = await sb.auth.getSession();
+  if (session) {
+    await onSignedIn(session.user);
+  } else {
+    // Show auth overlay
+    const overlay = qs('#auth-overlay');
+    if (overlay) overlay.style.display = 'flex';
+  }
+
+  // Listen for auth changes (OAuth redirect callback)
+  sb.auth.onAuthStateChange(async (event, session) => {
+    if (event === 'SIGNED_IN' && session && !currentUser) {
+      await onSignedIn(session.user);
     }
+    if (event === 'SIGNED_OUT') onSignedOut();
   });
-}
 
-export async function signOut() {
-  return await supabase.auth.signOut();
-}
+  // ═══════════════════════════════════════════════════════════════
+  // PROFILE & STREAK
+  // ═══════════════════════════════════════════════════════════════
+  async function loadProfile() {
+    const { data } = await sb.from('profiles').select('*').eq('id', currentUser.id).single();
+    if (data) { profile = data; lightMode = data.settings?.lightmode ?? false; applyTheme(); }
+  }
 
-export async function getSession() {
-  const { data: { session } } = await supabase.auth.getSession();
-  return session;
-}
+  async function incrementStreakToday() {
+    await sb.rpc('increment_streak', { uid: currentUser.id });
+    await loadProfile();
+    renderStreak();
+  }
 
-export async function getUser() {
-  const { data: { user } } = await supabase.auth.getUser();
-  return user;
-}
+  function renderStreak() {
+    const count = profile?.streak_count ?? 0;
+    qsAll('.streak-num').forEach(el => el.textContent = count);
+    const flame = qs('#header-streak');
+    if (flame) flame.textContent = '🔥 ' + count + ' day streak';
+  }
 
-// Listen for auth state changes
-export function onAuthChange(callback) {
-  return supabase.auth.onAuthStateChange((event, session) => {
-    callback(event, session);
+  // ═══════════════════════════════════════════════════════════════
+  // NOTES
+  // ═══════════════════════════════════════════════════════════════
+  async function loadNotes() {
+    const { data } = await sb.from('notes').select('*')
+      .eq('user_id', currentUser.id).order('modified_at', { ascending: false });
+    notes = data ?? [];
+  }
+
+  async function saveNote() {
+    if (!currentNote) return;
+    const payload = {
+      user_id: currentUser.id,
+      title: currentNote.title || '',
+      content: currentNote.content || '',
+      tag: currentNote.tag || null,
+      modified_at: new Date().toISOString()
+    };
+    if (currentNote.id) {
+      await sb.from('notes').update(payload).eq('id', currentNote.id);
+    } else {
+      const { data } = await sb.from('notes').insert(payload).select().single();
+      if (data) currentNote.id = data.id;
+    }
+    await loadNotes();
+    renderNotesList();
+    showToast('✓ Saved');
+  }
+
+  async function deleteNote(id) {
+    await sb.from('notes').delete().eq('id', id);
+    currentNote = null;
+    await loadNotes();
+    renderNotesList();
+    renderEditor();
+  }
+
+  function renderNotesList() {
+    const list = qs('#notes-list');
+    if (!list) return;
+    const filtered = activeTag ? notes.filter(n => n.tag === activeTag) : notes;
+    const countEl  = qs('#notes-count');
+    if (countEl) countEl.textContent = notes.length;
+
+    list.innerHTML = filtered.length === 0
+      ? '<div style="padding:20px;color:var(--text3);text-align:center;">No notes yet — hit ＋</div>'
+      : filtered.map(n => `
+          <div class="note-row ${currentNote?.id === n.id ? 'active' : ''}" data-id="${n.id}">
+            <div class="note-row-title">${esc(n.title || 'Untitled')}</div>
+            <div class="note-row-preview">${esc((n.content||'').slice(0,55))}</div>
+            ${n.tag ? `<span class="ntag ntag-${n.tag}">● ${n.tag}</span>` : ''}
+          </div>`).join('');
+
+    list.querySelectorAll('.note-row').forEach(el =>
+      el.addEventListener('click', () => {
+        const n = notes.find(x => x.id == el.dataset.id);
+        if (n) { currentNote = { ...n }; renderNotesList(); renderEditor(); }
+      }));
+  }
+
+  function renderEditor() {
+    const title   = qs('#note-title');
+    const content = qs('#note-content');
+    const delBtn  = qs('#btn-del-note');
+    if (!currentNote) {
+      if (title)   title.value   = '';
+      if (content) content.value = '';
+      if (delBtn)  delBtn.style.display = 'none';
+      return;
+    }
+    if (title)   title.value   = currentNote.title   || '';
+    if (content) content.value = currentNote.content || '';
+    if (delBtn)  delBtn.style.display = '';
+    qsAll('.tag-pill').forEach(b =>
+      b.classList.toggle('active', b.dataset.tag === currentNote.tag));
+  }
+
+  // Wire note editor
+  on('#btn-new-note',  'click', () => { currentNote = { title:'', content:'', tag:null }; renderEditor(); renderNotesList(); });
+  on('#btn-save-note', 'click', saveNote);
+  on('#btn-del-note',  'click', () => currentNote?.id && deleteNote(currentNote.id));
+  on('#note-title',    'input', e => { if (currentNote) currentNote.title   = e.target.value; });
+  on('#note-content',  'input', e => { if (currentNote) currentNote.content = e.target.value; });
+
+  qsAll('.tag-pill').forEach(btn => btn.addEventListener('click', () => {
+    if (!currentNote) return;
+    currentNote.tag = currentNote.tag === btn.dataset.tag ? null : btn.dataset.tag;
+    qsAll('.tag-pill').forEach(b => b.classList.toggle('active', b.dataset.tag === currentNote.tag));
+  }));
+
+  qsAll('.filter-tag').forEach(btn => btn.addEventListener('click', () => {
+    activeTag = activeTag === btn.dataset.tag ? null : btn.dataset.tag;
+    qsAll('.filter-tag').forEach(b => b.classList.toggle('active', b.dataset.tag === activeTag));
+    renderNotesList();
+  }));
+
+  // ═══════════════════════════════════════════════════════════════
+  // TODOS
+  // ═══════════════════════════════════════════════════════════════
+  async function loadTodos() {
+    const { data } = await sb.from('todos').select('*')
+      .eq('user_id', currentUser.id).order('created_at', { ascending: false });
+    todos = data ?? [];
+  }
+
+  async function addTodo(text, priority) {
+    if (!text.trim()) return;
+    await sb.from('todos').insert({ user_id: currentUser.id, text: text.trim(), priority: priority || '2' });
+    await loadTodos(); renderTodos();
+  }
+
+  async function toggleTodo(id) {
+    const t = todos.find(x => x.id === id);
+    if (!t) return;
+    await sb.from('todos').update({ done: !t.done, done_at: !t.done ? new Date().toISOString() : null }).eq('id', id);
+    if (!t.done) { playDone(); await incrementStreakToday(); }
+    await loadTodos(); renderTodos();
+  }
+
+  async function deleteTodo(id) {
+    await sb.from('todos').delete().eq('id', id);
+    await loadTodos(); renderTodos();
+  }
+
+  function renderTodos() {
+    const list = qs('#todos-list');
+    if (!list) return;
+    const open = todos.filter(t => !t.done);
+    const done = todos.filter(t =>  t.done);
+    const pct  = todos.length ? Math.round(done.length / todos.length * 100) : 0;
+
+    const countEl = qs('#todos-count');
+    if (countEl) countEl.textContent = open.length;
+    const progEl  = qs('#todo-progress-pct');
+    if (progEl)  progEl.textContent  = pct + '%';
+    const barEl   = qs('#todo-progress-bar');
+    if (barEl)   barEl.style.width   = pct + '%';
+
+    const frogEl  = qs('#frog-task-text');
+    const frog    = todos.find(t => t.priority === 'frog' && !t.done);
+    if (frogEl)  frogEl.textContent  = frog ? frog.text : '';
+
+    list.innerHTML = [...open, ...done].map(t => `
+      <div class="todo-item ${t.done ? 'done' : ''}" data-id="${t.id}">
+        <span class="todo-cb" data-id="${t.id}">${t.done ? '✓' : '○'}</span>
+        <span class="todo-txt">${esc(t.text)}</span>
+        ${t.priority === 'frog' ? '<span style="font-size:14px;">🐸</span>' : ''}
+        <span class="todo-del" data-id="${t.id}">🗑</span>
+      </div>`).join('');
+
+    list.querySelectorAll('.todo-cb').forEach(el =>
+      el.addEventListener('click', () => toggleTodo(Number(el.dataset.id))));
+    list.querySelectorAll('.todo-del').forEach(el =>
+      el.addEventListener('click', () => deleteTodo(Number(el.dataset.id))));
+  }
+
+  on('#btn-add-todo', 'click', () => {
+    const inp = qs('#todo-input');
+    const pri = qs('#todo-priority')?.value || '2';
+    if (inp?.value.trim()) { addTodo(inp.value, pri); inp.value = ''; }
   });
-}
+  on('#todo-input', 'keydown', e => { if (e.key === 'Enter') qs('#btn-add-todo')?.click(); });
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  PROFILE
-// ═══════════════════════════════════════════════════════════════════════════
-
-export async function getProfile() {
-  const user = await getUser();
-  if (!user) return null;
-  const { data } = await supabase.from('profiles').select('*').eq('id', user.id).single();
-  return data;
-}
-
-export async function updateProfile(updates) {
-  const user = await getUser();
-  if (!user) return;
-  return await supabase.from('profiles').update(updates).eq('id', user.id);
-}
-
-export async function syncStreak(streakObj) {
-  const user = await getUser();
-  if (!user) return;
-  return await supabase.from('profiles').update({
-    streak_count: streakObj.count,
-    streak_last_active: new Date().toISOString().split('T')[0],
-    settings: streakObj.settings || {}
-  }).eq('id', user.id);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  NOTES
-// ═══════════════════════════════════════════════════════════════════════════
-
-export async function fetchNotes() {
-  const { data, error } = await supabase
-    .from('notes')
-    .select('*')
-    .order('modified_at', { ascending: false });
-  if (error) { console.error('[DB] fetchNotes', error); return []; }
-  return data.map(n => ({
-    id: n.id,
-    title: n.title || '',
-    content: n.content || '',
-    tag: n.tag,
-    modified: new Date(n.modified_at).getTime()
-  }));
-}
-
-export async function upsertNote(note, userId) {
-  const payload = {
-    user_id: userId,
-    title: note.title || '',
-    content: note.content || '',
-    tag: note.tag || null,
-    modified_at: new Date().toISOString()
-  };
-  // Only include id for updates (existing DB rows have small integer IDs)
-  if (note.id && note.id < 1e12) payload.id = note.id;
-  const { data, error } = await supabase.from('notes').upsert(payload).select().single();
-  if (error) console.error('[DB] upsertNote', error);
-  return data;
-}
-
-export async function deleteNote(id) {
-  return await supabase.from('notes').delete().eq('id', id);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  TODOS
-// ═══════════════════════════════════════════════════════════════════════════
-
-export async function fetchTodos() {
-  const { data, error } = await supabase
-    .from('todos')
-    .select('*')
-    .order('created_at', { ascending: false });
-  if (error) { console.error('[DB] fetchTodos', error); return []; }
-  return data.map(t => ({
-    id: t.id,
-    text: t.text,
-    priority: t.priority,
-    done: t.done,
-    due: t.due_label || 'Today',
-    cal: t.cal_linked,
-    created: new Date(t.created_at).getTime()
-  }));
-}
-
-export async function upsertTodo(todo, userId) {
-  const payload = {
-    user_id: userId,
-    text: todo.text,
-    priority: String(todo.priority),
-    done: todo.done,
-    due_label: todo.due || 'Today',
-    cal_linked: todo.cal || false,
-    done_at: todo.done ? new Date().toISOString() : null
-  };
-  if (todo.id && todo.id < 1e12) payload.id = todo.id;
-  const { data, error } = await supabase.from('todos').upsert(payload).select().single();
-  if (error) console.error('[DB] upsertTodo', error);
-  return data;
-}
-
-export async function deleteTodo(id) {
-  return await supabase.from('todos').delete().eq('id', id);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  CALENDAR EVENTS
-// ═══════════════════════════════════════════════════════════════════════════
-
-export async function fetchCalEvents() {
-  const { data, error } = await supabase
-    .from('cal_events')
-    .select('*')
-    .order('created_at', { ascending: false });
-  if (error) { console.error('[DB] fetchCalEvents', error); return []; }
-  return data.map(e => ({
-    id: e.id,
-    title: e.title,
-    day: e.event_day,
-    start: e.start_hour,
-    end: e.end_hour,
-    color: e.color,
-    gcal: e.gcal_linked
-  }));
-}
-
-export async function upsertCalEvent(ev, userId) {
-  const payload = {
-    user_id: userId,
-    title: ev.title,
-    event_day: ev.day,
-    start_hour: ev.start,
-    end_hour: ev.end,
-    color: ev.color || 'blue',
-    gcal_linked: ev.gcal || false,
-    gcal_event_id: ev.gcalEventId || null
-  };
-  if (ev.id && ev.id < 1e12) payload.id = ev.id;
-  return await supabase.from('cal_events').upsert(payload);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  GOOGLE CALENDAR SYNC
-// ═══════════════════════════════════════════════════════════════════════════
-
-export async function fetchGoogleCalendarEvents() {
-  const session = await getSession();
-  if (!session?.provider_token) {
-    console.warn('[GCal] No provider token — user must sign in with Google');
-    return [];
+  // ═══════════════════════════════════════════════════════════════
+  // CALENDAR
+  // ═══════════════════════════════════════════════════════════════
+  async function loadCalEvents() {
+    const { data } = await sb.from('cal_events').select('*')
+      .eq('user_id', currentUser.id).order('event_date', { ascending: true });
+    calEvents = data ?? [];
   }
-  const now = new Date().toISOString();
-  const end = new Date(Date.now() + 14 * 24 * 3600000).toISOString(); // 2 weeks ahead
-  try {
-    const res = await fetch(
-      `https://www.googleapis.com/calendar/v3/calendars/primary/events` +
-      `?timeMin=${now}&timeMax=${end}&singleEvents=true&orderBy=startTime&maxResults=50`,
-      { headers: { Authorization: `Bearer ${session.provider_token}` } }
-    );
-    const json = await res.json();
-    if (json.error) { console.error('[GCal]', json.error); return []; }
-    return (json.items || []).map(item => ({
-      gcalEventId: item.id,
-      title: item.summary || '(No title)',
-      start: item.start.dateTime || item.start.date,
-      end: item.end.dateTime || item.end.date,
-      description: item.description || '',
-      location: item.location || '',
-      htmlLink: item.htmlLink
-    }));
-  } catch (err) {
-    console.error('[GCal] fetch error', err);
-    return [];
-  }
-}
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  WIRE INTO FLOWNOTE WINDOW FUNCTIONS
-//  Add this block to your index.html inside a <script type="module"> tag
-//  AFTER the main <script> block
-// ═══════════════════════════════════════════════════════════════════════════
-//
-//  <script type="module">
-//    import * as DB from '/app.js';
-//    window.DB = DB;
-//
-//    // Replace demo auth with real Supabase auth
-//    window.authLogin = async () => {
-//      const email = document.getElementById('login-email').value.trim();
-//      const pwd   = document.getElementById('login-password').value;
-//      const { data, error } = await DB.signIn({ email, password: pwd });
-//      if (error) { showAuthError(error.message); return; }
-//      const u = data.user;
-//      saveUser({ name: u.user_metadata?.name || email.split('@')[0],
-//                 nickname: u.user_metadata?.nickname || '', email });
-//      hideAuthModal();
-//      // Pull cloud data
-//      const [notes, todos, events] = await Promise.all([
-//        DB.fetchNotes(), DB.fetchTodos(), DB.fetchCalEvents()
-//      ]);
-//      if (notes.length)  state.notes     = notes;
-//      if (todos.length)  state.todos     = todos;
-//      if (events.length) state.calEvents = events;
-//      renderNotesList(); renderTodos(); renderCalendar();
-//      showToast('Synced from cloud ✓', 'success');
-//    };
-//
-//    window.authSignup = async () => {
-//      const fname = document.getElementById('signup-fname').value.trim();
-//      const nick  = document.getElementById('signup-nick').value.trim();
-//      const email = document.getElementById('signup-email').value.trim();
-//      const pwd   = document.getElementById('signup-password').value;
-//      if (!fname||!email||!pwd||pwd.length<8) {
-//        showAuthError('All fields required. Password min 8 chars.'); return;
-//      }
-//      const { data, error } = await DB.signUp({ email, password: pwd, name: fname, nickname: nick });
-//      if (error) { showAuthError(error.message); return; }
-//      saveUser({ name: fname, nickname: nick, email });
-//      hideAuthModal();
-//      showToast('Welcome to FlowNote, ' + (nick||fname) + '! 🐸', 'success');
-//    };
-//
-//    window.authGoogle = async () => {
-//      const { error } = await DB.signInWithGoogle();
-//      if (error) showToast('Google sign-in failed: ' + error.message, 'info');
-//      // Page will redirect and return with session
-//    };
-//
-//    // Auto-patch save() to also sync to Supabase (debounced)
-//    let syncTimer = null;
-//    const _origSave = save;
-//    window.save = function() {
-//      _origSave();
-//      clearTimeout(syncTimer);
-//      syncTimer = setTimeout(async () => {
-//        const user = await DB.getUser();
-//        if (!user) return;
-//        // Sync only notes/todos modified in the last 60s
-//        const cutoff = Date.now() - 60000;
-//        const recentNotes = state.notes.filter(n => n.modified > cutoff);
-//        const recentTodos = state.todos.filter(t => (t.created || 0) > cutoff || t.done);
-//        await Promise.all([
-//          ...recentNotes.map(n => DB.upsertNote(n, user.id)),
-//          ...recentTodos.map(t => DB.upsertTodo(t, user.id)),
-//          DB.syncStreak(state.streak),
-//        ]);
-//      }, 2000);
-//    };
-//
-//    // Check session on load
-//    const session = await DB.getSession();
-//    if (session) {
-//      const u = session.user;
-//      saveUser({ name: u.user_metadata?.name || u.email.split('@')[0],
-//                 nickname: u.user_metadata?.nickname || '', email: u.email });
-//      const [notes, todos, events] = await Promise.all([
-//        DB.fetchNotes(), DB.fetchTodos(), DB.fetchCalEvents()
-//      ]);
-//      if (notes.length)  { state.notes = notes; renderNotesList(); openNote(notes[0].id); }
-//      if (todos.length)  { state.todos = todos; renderTodos(); }
-//      if (events.length) { state.calEvents = events; renderCalendar(); }
-//    }
-//  </script>
+  async function saveCalEvent(ev) {
+    await sb.from('cal_events').insert({ ...ev, user_id: currentUser.id });
+    await loadCalEvents(); renderCalendar();
+    showToast('✓ Event saved');
+  }
+
+  async function deleteCalEvent(id) {
+    await sb.from('cal_events').delete().eq('id', id);
+    await loadCalEvents(); renderCalendar();
+  }
+
+  function renderCalendar() {
+    const list = qs('#cal-events-list');
+    if (!list) return;
+    const d = new Date();
+    d.setDate(d.getDate() + todayOffset);
+    const dateStr  = d.toISOString().split('T')[0];
+    const labelEl  = qs('#cal-date-label');
+    if (labelEl) labelEl.textContent = d.toLocaleDateString('en-IN', { weekday:'long', month:'long', day:'numeric' });
+
+    const todayEvs = calEvents.filter(e => e.event_date === dateStr);
+    list.innerHTML = todayEvs.length === 0
+      ? '<div style="padding:20px;color:var(--text3);text-align:center;">No events today</div>'
+      : todayEvs.map(e => `
+          <div class="cal-ev" style="border-left:3px solid var(--accent)">
+            <div class="cal-ev-title">${esc(e.title)}</div>
+            ${e.start_hour != null ? `<div class="cal-ev-time">${fmtHour(e.start_hour)} – ${fmtHour(e.end_hour)}</div>` : ''}
+            <span class="cal-ev-del" data-id="${e.id}">✕</span>
+          </div>`).join('');
+
+    list.querySelectorAll('.cal-ev-del').forEach(el =>
+      el.addEventListener('click', () => deleteCalEvent(Number(el.dataset.id))));
+
+    const upEl = qs('#cal-upcoming');
+    if (upEl) {
+      const upcoming = calEvents.filter(e => e.event_date > dateStr).slice(0, 5);
+      upEl.innerHTML = upcoming.map(e =>
+        `<div class="upcoming-ev"><span>${esc(e.title)}</span><span>${e.event_date}</span></div>`
+      ).join('') || '<div style="color:var(--text3);padding:10px 0;">No upcoming events</div>';
+    }
+  }
+
+  on('#btn-cal-prev',  'click', () => { todayOffset--; renderCalendar(); });
+  on('#btn-cal-next',  'click', () => { todayOffset++; renderCalendar(); });
+  on('#btn-cal-today', 'click', () => { todayOffset = 0; renderCalendar(); });
+
+  on('#btn-new-event', 'click', () => {
+    const m = qs('#event-modal');
+    if (m) m.style.display = 'flex';
+  });
+  on('#btn-cancel-event', 'click', () => {
+    const m = qs('#event-modal');
+    if (m) m.style.display = 'none';
+  });
+  on('#btn-save-event', 'click', async () => {
+    const title = val('#event-title');
+    const date  = val('#event-date');
+    if (!title || !date) return showToast('Title and date required', true);
+    const toH = t => { if (!t) return null; const [h,m] = t.split(':').map(Number); return h + m/60; };
+    await saveCalEvent({
+      title, event_date: date,
+      start_hour: toH(val('#event-start')),
+      end_hour:   toH(val('#event-end')),
+      color: qs('#event-color')?.value || 'blue',
+      notes: val('#event-notes')
+    });
+    const m = qs('#event-modal');
+    if (m) m.style.display = 'none';
+    ['#event-title','#event-date','#event-start','#event-end','#event-notes']
+      .forEach(s => { const el = qs(s); if (el) el.value = ''; });
+  });
+
+  // ═══════════════════════════════════════════════════════════════
+  // SETTINGS
+  // ═══════════════════════════════════════════════════════════════
+  async function saveSetting(key, value) {
+    if (!profile) return;
+    const settings = { ...profile.settings, [key]: value };
+    await sb.from('profiles').update({ settings }).eq('id', currentUser.id);
+    profile.settings = settings;
+  }
+
+  on('#toggle-theme', 'click', async () => {
+    lightMode = !lightMode; applyTheme();
+    await saveSetting('lightmode', lightMode);
+  });
+
+  on('#btn-export', 'click', () => {
+    const blob = new Blob([JSON.stringify({ notes, todos, calEvents }, null, 2)], { type: 'application/json' });
+    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'flownote-export.json' });
+    a.click();
+  });
+
+  on('#btn-reset-streak', 'click', async () => {
+    if (!confirm('Reset your streak? Cannot be undone.')) return;
+    await sb.from('profiles').update({ streak_count: 0, streak_last_active: null }).eq('id', currentUser.id);
+    await loadProfile(); renderStreak(); showToast('Streak reset');
+  });
+
+  on('#btn-use-freeze', 'click', () => showToast('❄️ Freeze used! Streak protected'));
+
+  on('#btn-signout', 'click', () => sb.auth.signOut());
+
+  // Settings toggles
+  [['#toggle-reminder','reminder'],['#toggle-motivation','motivation'],
+   ['#toggle-autoblock','autoblock'],['#toggle-meetingprep','meetingprep'],
+   ['#toggle-vibration','vibration'],['#toggle-sound','sound']]
+  .forEach(([sel, key]) => on(sel, 'change', e => saveSetting(key, e.target.checked)));
+
+  // ═══════════════════════════════════════════════════════════════
+  // QUICK CAPTURE
+  // ═══════════════════════════════════════════════════════════════
+  on('#btn-fab', 'click', () => {
+    const p = qs('#quick-capture');
+    if (p) { const open = p.classList.toggle('open'); if (open) qs('#quick-input')?.focus(); }
+  });
+  on('#btn-close-quick', 'click', () => qs('#quick-capture')?.classList.remove('open'));
+  on('#btn-quick-save',  'click', async () => {
+    const text = val('#quick-input');
+    if (!text) return;
+    await addTodo(text, '2');
+    qs('#quick-input').value = '';
+    qs('#quick-capture')?.classList.remove('open');
+  });
+  on('#quick-input', 'keydown', e => {
+    if (e.key === 'Enter') qs('#btn-quick-save')?.click();
+    if (e.key === 'Escape') qs('#quick-capture')?.classList.remove('open');
+  });
+
+  // ═══════════════════════════════════════════════════════════════
+  // RENDER ALL
+  // ═══════════════════════════════════════════════════════════════
+  function renderAll() {
+    renderStreak();
+    renderNotesList();
+    renderEditor();
+    renderTodos();
+    renderCalendar();
+    renderSettingsProfile();
+  }
+
+  function renderSettingsProfile() {
+    const el = qs('#profile-name');
+    if (el) el.textContent = profile?.name || currentUser?.email || '';
+    const s = qs('#profile-streak-val');
+    if (s) s.textContent = profile?.streak_count ?? 0;
+    // Sync toggles
+    const map = { '#toggle-reminder':'reminder','#toggle-motivation':'motivation',
+      '#toggle-autoblock':'autoblock','#toggle-meetingprep':'meetingprep',
+      '#toggle-vibration':'vibration','#toggle-sound':'sound' };
+    const settings = profile?.settings || {};
+    Object.entries(map).forEach(([sel, key]) => {
+      const el = qs(sel); if (el) el.checked = settings[key] ?? true;
+    });
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // UTILITIES
+  // ═══════════════════════════════════════════════════════════════
+  function applyTheme() { document.body.classList.toggle('light-mode', lightMode); }
+
+  function playDone() {
+    if (!profile?.settings?.sound) return;
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator(), gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(440, ctx.currentTime + 0.1);
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+      osc.start(); osc.stop(ctx.currentTime + 0.3);
+    } catch(e) {}
+  }
+
+  function showToast(msg, isError = false) {
+    let t = qs('#toast');
+    if (!t) {
+      t = document.createElement('div');
+      t.id = 'toast';
+      t.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--accent,#6c63ff);color:#fff;padding:10px 20px;border-radius:8px;font-size:14px;z-index:9999;transition:opacity .3s;';
+      document.body.appendChild(t);
+    }
+    t.textContent = msg;
+    t.style.background = isError ? '#e74c3c' : 'var(--accent, #6c63ff)';
+    t.style.opacity = '1';
+    clearTimeout(t._timer);
+    t._timer = setTimeout(() => t.style.opacity = '0', 2500);
+  }
+
+  function fmtHour(h) {
+    if (h == null) return '';
+    const hh = Math.floor(h), mm = Math.round((h - hh) * 60);
+    return `${hh % 12 || 12}:${mm.toString().padStart(2,'0')} ${hh >= 12 ? 'PM' : 'AM'}`;
+  }
+
+  function esc(str) {
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+})();
