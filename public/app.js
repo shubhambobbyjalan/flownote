@@ -1114,6 +1114,10 @@ function toast(msg,isErr=false){
 // Check notification permission
 if('Notification' in window && Notification.permission==='granted') notifPermission=true;
 
+// Remove loading screen
+const loader=document.getElementById('fn-loader');
+if(loader) loader.remove();
+
 applyTheme();
 goSec('notes');
 renderCal();
